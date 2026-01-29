@@ -1,0 +1,723 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Workshop Progress Tracker - S3 Static Website with Lambda for Activity Tracking'
+
+Resources:
+  # S3 Bucket for Static Website
+  ProgressTrackerBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'ssm-workshop-tracker-${AWS::AccountId}'
+      WebsiteConfiguration:
+        IndexDocument: index.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+
+  # Bucket Policy for Public Read
+  ProgressTrackerBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ProgressTrackerBucket
+      PolicyDocument:
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Sub '${ProgressTrackerBucket.Arn}/*'
+
+  # DynamoDB Table for Progress Tracking
+  ProgressTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: SSM-Workshop-Progress
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: activityId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: activityId
+          KeyType: RANGE
+
+  # Lambda Execution Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: SSM-Workshop-Tracker-Lambda-Role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !GetAtt ProgressTable.Arn
+        - PolicyName: CloudTrailAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudtrail:LookupEvents
+                Resource: '*'
+        - PolicyName: EC2ReadAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeVpcEndpoints
+                  - iam:GetRole
+                  - iam:GetInstanceProfile
+                Resource: '*'
+
+  # Lambda Function for Progress Tracking
+  ProgressTrackerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: SSM-Workshop-Progress-Tracker
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref ProgressTable
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime, timedelta
+          
+          dynamodb = boto3.resource('dynamodb')
+          cloudtrail = boto3.client('cloudtrail')
+          ec2 = boto3.client('ec2')
+          iam = boto3.client('iam')
+          table = dynamodb.Table(os.environ['TABLE_NAME'])
+          
+          def lambda_handler(event, context):
+              # Get user ID from request
+              user_id = event.get('queryStringParameters', {}).get('userId', 'default-user')
+              
+              # Check all activities
+              activities = check_all_activities()
+              
+              # Update DynamoDB
+              for activity in activities:
+                  table.put_item(
+                      Item={
+                          'userId': user_id,
+                          'activityId': activity['id'],
+                          'status': activity['status'],
+                          'timestamp': datetime.now().isoformat(),
+                          'details': activity.get('details', '')
+                      }
+                  )
+              
+              return {
+                  'statusCode': 200,
+                  'headers': {
+                      'Content-Type': 'application/json',
+                      'Access-Control-Allow-Origin': '*'
+                  },
+                  'body': json.dumps({
+                      'activities': activities,
+                      'lastUpdated': datetime.now().isoformat()
+                  })
+              }
+          
+          def check_all_activities():
+              activities = []
+              
+              # Activity 1: IAM Role Created
+              activities.append(check_iam_role())
+              
+              # Activity 2: Security Groups Created
+              activities.append(check_security_groups())
+              
+              # Activity 3: VPC Endpoints Created
+              activities.append(check_vpc_endpoints())
+              
+              # Activity 4: Linux Instance Launched
+              activities.append(check_linux_instance())
+              
+              # Activity 5: Windows Instance Launched
+              activities.append(check_windows_instance())
+              
+              # Activity 6: Session Manager Access
+              activities.append(check_session_manager_access())
+              
+              return activities
+          
+          def check_iam_role():
+              try:
+                  iam.get_role(RoleName='EC2-SSM-Role')
+                  return {
+                      'id': 'iam-role',
+                      'name': 'Create IAM Role (EC2-SSM-Role)',
+                      'status': 'completed',
+                      'details': 'IAM role found'
+                  }
+              except:
+                  return {
+                      'id': 'iam-role',
+                      'name': 'Create IAM Role (EC2-SSM-Role)',
+                      'status': 'pending',
+                      'details': 'IAM role not found'
+                  }
+          
+          def check_security_groups():
+              try:
+                  response = ec2.describe_security_groups(
+                      Filters=[
+                          {'Name': 'group-name', 'Values': ['VPCEndpoint-SG', 'Instance-SG']}
+                      ]
+                  )
+                  found = len(response['SecurityGroups'])
+                  if found >= 2:
+                      return {
+                          'id': 'security-groups',
+                          'name': 'Create Security Groups (2 required)',
+                          'status': 'completed',
+                          'details': f'Found {found} security groups'
+                      }
+                  else:
+                      return {
+                          'id': 'security-groups',
+                          'name': 'Create Security Groups (2 required)',
+                          'status': 'partial',
+                          'details': f'Found {found}/2 security groups'
+                      }
+              except:
+                  return {
+                      'id': 'security-groups',
+                      'name': 'Create Security Groups (2 required)',
+                      'status': 'pending',
+                      'details': 'No security groups found'
+                  }
+          
+          def check_vpc_endpoints():
+              try:
+                  response = ec2.describe_vpc_endpoints(
+                      Filters=[
+                          {'Name': 'service-name', 'Values': [
+                              'com.amazonaws.us-east-1.ssm',
+                              'com.amazonaws.us-east-1.ssmmessages',
+                              'com.amazonaws.us-east-1.ec2messages',
+                              'com.amazonaws.us-east-1.s3'
+                          ]}
+                      ]
+                  )
+                  found = len(response['VpcEndpoints'])
+                  if found >= 4:
+                      return {
+                          'id': 'vpc-endpoints',
+                          'name': 'Create VPC Endpoints (4 required)',
+                          'status': 'completed',
+                          'details': f'Found {found} VPC endpoints'
+                      }
+                  else:
+                      return {
+                          'id': 'vpc-endpoints',
+                          'name': 'Create VPC Endpoints (4 required)',
+                          'status': 'partial',
+                          'details': f'Found {found}/4 VPC endpoints'
+                      }
+              except:
+                  return {
+                      'id': 'vpc-endpoints',
+                      'name': 'Create VPC Endpoints (4 required)',
+                      'status': 'pending',
+                      'details': 'No VPC endpoints found'
+                  }
+          
+          def check_linux_instance():
+              try:
+                  response = ec2.describe_instances(
+                      Filters=[
+                          {'Name': 'tag:Name', 'Values': ['SSM-Linux-Instance']},
+                          {'Name': 'instance-state-name', 'Values': ['running', 'pending']}
+                      ]
+                  )
+                  if response['Reservations']:
+                      return {
+                          'id': 'linux-instance',
+                          'name': 'Launch Linux Instance',
+                          'status': 'completed',
+                          'details': 'Linux instance running'
+                      }
+                  else:
+                      return {
+                          'id': 'linux-instance',
+                          'name': 'Launch Linux Instance',
+                          'status': 'pending',
+                          'details': 'No Linux instance found'
+                      }
+              except:
+                  return {
+                      'id': 'linux-instance',
+                      'name': 'Launch Linux Instance',
+                      'status': 'pending',
+                      'details': 'Error checking instance'
+                  }
+          
+          def check_windows_instance():
+              try:
+                  response = ec2.describe_instances(
+                      Filters=[
+                          {'Name': 'tag:Name', 'Values': ['SSM-Windows-Instance']},
+                          {'Name': 'instance-state-name', 'Values': ['running', 'pending']}
+                      ]
+                  )
+                  if response['Reservations']:
+                      return {
+                          'id': 'windows-instance',
+                          'name': 'Launch Windows Instance',
+                          'status': 'completed',
+                          'details': 'Windows instance running'
+                      }
+                  else:
+                      return {
+                          'id': 'windows-instance',
+                          'name': 'Launch Windows Instance',
+                          'status': 'pending',
+                          'details': 'No Windows instance found'
+                      }
+              except:
+                  return {
+                      'id': 'windows-instance',
+                      'name': 'Launch Windows Instance',
+                      'status': 'pending',
+                      'details': 'Error checking instance'
+                  }
+          
+          def check_session_manager_access():
+              try:
+                  # Check CloudTrail for StartSession events in last 24 hours
+                  end_time = datetime.now()
+                  start_time = end_time - timedelta(hours=24)
+                  
+                  response = cloudtrail.lookup_events(
+                      LookupAttributes=[
+                          {'AttributeKey': 'EventName', 'AttributeValue': 'StartSession'}
+                      ],
+                      StartTime=start_time,
+                      EndTime=end_time,
+                      MaxResults=1
+                  )
+                  
+                  if response['Events']:
+                      return {
+                          'id': 'session-manager',
+                          'name': 'Access via Session Manager',
+                          'status': 'completed',
+                          'details': 'Session Manager access detected'
+                      }
+                  else:
+                      return {
+                          'id': 'session-manager',
+                          'name': 'Access via Session Manager',
+                          'status': 'pending',
+                          'details': 'No Session Manager access detected'
+                      }
+              except:
+                  return {
+                      'id': 'session-manager',
+                      'name': 'Access via Session Manager',
+                      'status': 'pending',
+                      'details': 'Unable to check CloudTrail'
+                  }
+
+  # Lambda Function URL
+  ProgressTrackerFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt ProgressTrackerFunction.Arn
+      AuthType: NONE
+      Cors:
+        AllowOrigins:
+          - '*'
+        AllowMethods:
+          - GET
+        AllowHeaders:
+          - '*'
+
+  # Permission for Function URL
+  ProgressTrackerFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ProgressTrackerFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: '*'
+      FunctionUrlAuthType: NONE
+
+  # Custom Resource to Upload HTML to S3
+  UploadHTMLFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: SSM-Workshop-Upload-HTML
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt UploadHTMLLambdaRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+          
+          s3 = boto3.client('s3')
+          
+          def lambda_handler(event, context):
+              try:
+                  if event['RequestType'] == 'Delete':
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+                  
+                  bucket_name = event['ResourceProperties']['BucketName']
+                  api_url = event['ResourceProperties']['ApiUrl']
+                  
+                  html_content = generate_html(api_url)
+                  
+                  s3.put_object(
+                      Bucket=bucket_name,
+                      Key='index.html',
+                      Body=html_content,
+                      ContentType='text/html'
+                  )
+                  
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {})
+          
+          def generate_html(api_url):
+              return f'''<!DOCTYPE html>
+          <html lang="en">
+          <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>SSM Workshop Progress Tracker</title>
+              <style>
+                  * {{
+                      margin: 0;
+                      padding: 0;
+                      box-sizing: border-box;
+                  }}
+                  body {{
+                      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                      min-height: 100vh;
+                      padding: 20px;
+                  }}
+                  .container {{
+                      max-width: 900px;
+                      margin: 0 auto;
+                      background: white;
+                      border-radius: 15px;
+                      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                      overflow: hidden;
+                  }}
+                  .header {{
+                      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                      color: white;
+                      padding: 30px;
+                      text-align: center;
+                  }}
+                  .header h1 {{
+                      font-size: 2em;
+                      margin-bottom: 10px;
+                  }}
+                  .header p {{
+                      opacity: 0.9;
+                      font-size: 1.1em;
+                  }}
+                  .progress-summary {{
+                      padding: 20px 30px;
+                      background: #f8f9fa;
+                      border-bottom: 2px solid #e9ecef;
+                      display: flex;
+                      justify-content: space-between;
+                      align-items: center;
+                  }}
+                  .progress-bar-container {{
+                      flex: 1;
+                      margin-right: 20px;
+                  }}
+                  .progress-bar {{
+                      height: 30px;
+                      background: #e9ecef;
+                      border-radius: 15px;
+                      overflow: hidden;
+                      position: relative;
+                  }}
+                  .progress-bar-fill {{
+                      height: 100%;
+                      background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+                      transition: width 0.5s ease;
+                      display: flex;
+                      align-items: center;
+                      justify-content: center;
+                      color: white;
+                      font-weight: bold;
+                  }}
+                  .refresh-btn {{
+                      background: #667eea;
+                      color: white;
+                      border: none;
+                      padding: 12px 24px;
+                      border-radius: 8px;
+                      cursor: pointer;
+                      font-size: 1em;
+                      transition: all 0.3s;
+                  }}
+                  .refresh-btn:hover {{
+                      background: #764ba2;
+                      transform: translateY(-2px);
+                      box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+                  }}
+                  .activities {{
+                      padding: 30px;
+                  }}
+                  .activity {{
+                      background: white;
+                      border: 2px solid #e9ecef;
+                      border-radius: 10px;
+                      padding: 20px;
+                      margin-bottom: 15px;
+                      display: flex;
+                      align-items: center;
+                      transition: all 0.3s;
+                  }}
+                  .activity:hover {{
+                      box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+                      transform: translateX(5px);
+                  }}
+                  .activity.completed {{
+                      border-color: #28a745;
+                      background: #f0fff4;
+                  }}
+                  .activity.partial {{
+                      border-color: #ffc107;
+                      background: #fffbf0;
+                  }}
+                  .activity.pending {{
+                      border-color: #dc3545;
+                      background: #fff5f5;
+                  }}
+                  .status-icon {{
+                      width: 50px;
+                      height: 50px;
+                      border-radius: 50%;
+                      display: flex;
+                      align-items: center;
+                      justify-content: center;
+                      font-size: 24px;
+                      margin-right: 20px;
+                      flex-shrink: 0;
+                  }}
+                  .completed .status-icon {{
+                      background: #28a745;
+                      color: white;
+                  }}
+                  .partial .status-icon {{
+                      background: #ffc107;
+                      color: white;
+                  }}
+                  .pending .status-icon {{
+                      background: #dc3545;
+                      color: white;
+                  }}
+                  .activity-content {{
+                      flex: 1;
+                  }}
+                  .activity-name {{
+                      font-size: 1.2em;
+                      font-weight: 600;
+                      margin-bottom: 5px;
+                      color: #333;
+                  }}
+                  .activity-details {{
+                      color: #666;
+                      font-size: 0.9em;
+                  }}
+                  .loading {{
+                      text-align: center;
+                      padding: 40px;
+                      color: #666;
+                  }}
+                  .spinner {{
+                      border: 4px solid #f3f3f3;
+                      border-top: 4px solid #667eea;
+                      border-radius: 50%;
+                      width: 40px;
+                      height: 40px;
+                      animation: spin 1s linear infinite;
+                      margin: 0 auto 20px;
+                  }}
+                  @keyframes spin {{
+                      0% {{ transform: rotate(0deg); }}
+                      100% {{ transform: rotate(360deg); }}
+                  }}
+                  .last-updated {{
+                      text-align: center;
+                      padding: 20px;
+                      color: #666;
+                      font-size: 0.9em;
+                      border-top: 1px solid #e9ecef;
+                  }}
+              </style>
+          </head>
+          <body>
+              <div class="container">
+                  <div class="header">
+                      <h1>🚀 SSM Workshop Progress Tracker</h1>
+                      <p>Track your hands-on activities in real-time</p>
+                  </div>
+                  
+                  <div class="progress-summary">
+                      <div class="progress-bar-container">
+                          <div class="progress-bar">
+                              <div class="progress-bar-fill" id="progressBar">0%</div>
+                          </div>
+                      </div>
+                      <button class="refresh-btn" onclick="loadProgress()">🔄 Refresh</button>
+                  </div>
+                  
+                  <div class="activities" id="activities">
+                      <div class="loading">
+                          <div class="spinner"></div>
+                          <p>Loading your progress...</p>
+                      </div>
+                  </div>
+                  
+                  <div class="last-updated" id="lastUpdated"></div>
+              </div>
+              
+              <script>
+                  const API_URL = '{api_url}';
+                  
+                  async function loadProgress() {{
+                      try {{
+                          const response = await fetch(API_URL + '?userId=workshop-user');
+                          const data = await response.json();
+                          
+                          displayActivities(data.activities);
+                          updateProgress(data.activities);
+                          document.getElementById('lastUpdated').textContent = 
+                              'Last updated: ' + new Date(data.lastUpdated).toLocaleString();
+                      }} catch (error) {{
+                          console.error('Error loading progress:', error);
+                          document.getElementById('activities').innerHTML = 
+                              '<div class="loading"><p>Error loading progress. Please try again.</p></div>';
+                      }}
+                  }}
+                  
+                  function displayActivities(activities) {{
+                      const container = document.getElementById('activities');
+                      container.innerHTML = activities.map(activity => `
+                          <div class="activity ${{activity.status}}">
+                              <div class="status-icon">
+                                  ${{activity.status === 'completed' ? '✓' : 
+                                    activity.status === 'partial' ? '⚠' : '○'}}
+                              </div>
+                              <div class="activity-content">
+                                  <div class="activity-name">${{activity.name}}</div>
+                                  <div class="activity-details">${{activity.details}}</div>
+                              </div>
+                          </div>
+                      `).join('');
+                  }}
+                  
+                  function updateProgress(activities) {{
+                      const completed = activities.filter(a => a.status === 'completed').length;
+                      const total = activities.length;
+                      const percentage = Math.round((completed / total) * 100);
+                      
+                      const progressBar = document.getElementById('progressBar');
+                      progressBar.style.width = percentage + '%';
+                      progressBar.textContent = percentage + '%';
+                  }}
+                  
+                  // Auto-refresh every 30 seconds
+                  setInterval(loadProgress, 30000);
+                  
+                  // Initial load
+                  loadProgress();
+              </script>
+          </body>
+          </html>'''
+
+  # IAM Role for Upload Lambda
+  UploadHTMLLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+                Resource: !Sub '${ProgressTrackerBucket.Arn}/*'
+
+  # Custom Resource to Trigger Upload
+  TriggerHTMLUpload:
+    Type: Custom::UploadHTML
+    Properties:
+      ServiceToken: !GetAtt UploadHTMLFunction.Arn
+      BucketName: !Ref ProgressTrackerBucket
+      ApiUrl: !GetAtt ProgressTrackerFunctionUrl.FunctionUrl
+
+Outputs:
+  WebsiteURL:
+    Description: Workshop Progress Tracker Website URL
+    Value: !GetAtt ProgressTrackerBucket.WebsiteURL
+    Export:
+      Name: !Sub ${AWS::StackName}-WebsiteURL
+
+  WebsiteURLDirect:
+    Description: Direct S3 Website URL
+    Value: !Sub 'http://${ProgressTrackerBucket}.s3-website-${AWS::Region}.amazonaws.com'
+
+  LambdaFunctionURL:
+    Description: Lambda Function URL for API
+    Value: !GetAtt ProgressTrackerFunctionUrl.FunctionUrl
+
+  DynamoDBTable:
+    Description: DynamoDB Table for Progress Tracking
+    Value: !Ref ProgressTable

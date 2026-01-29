@@ -1,0 +1,69 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Part 1 - VPC Infrastructure for SSM Session Manager Workshop (No NAT Gateway)'
+
+Resources:
+  # VPC Configuration
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: SSM-Workshop-VPC
+
+  # Private Subnet (No Internet Gateway, No NAT Gateway)
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: SSM-Private-Subnet
+
+  # Route Table for Private Subnet
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: SSM-Private-RouteTable
+
+  # Associate Route Table with Private Subnet
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+Outputs:
+  VPCId:
+    Description: VPC ID for SSM Workshop
+    Value: !Ref VPC
+    Export:
+      Name: !Sub ${AWS::StackName}-VPC
+
+  PrivateSubnetId:
+    Description: Private Subnet ID
+    Value: !Ref PrivateSubnet
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateSubnet
+
+  PrivateRouteTableId:
+    Description: Private Route Table ID
+    Value: !Ref PrivateRouteTable
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateRouteTable
+
+  VPCCidr:
+    Description: VPC CIDR Block
+    Value: 10.0.0.0/16
+
+  PrivateSubnetCidr:
+    Description: Private Subnet CIDR Block
+    Value: 10.0.1.0/24
